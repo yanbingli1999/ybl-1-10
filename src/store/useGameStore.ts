@@ -145,6 +145,7 @@ function computeDayEndReport(
   if (!rentPaid) {
     penalties.push(`未支付租金！罚款 ${Math.floor(rent * 0.5)} ⬡，声誉 -15`)
     effectiveStats.penaltiesApplied.push(Math.floor(rent * 0.5))
+    effectiveStats.reputationChange -= 15
   }
   if (!cureTargetMet) {
     const shortfall = cureTarget - stats.curedToday
@@ -154,6 +155,7 @@ function computeDayEndReport(
   }
   if (!cureRateTargetMet && totalSeen > 0) {
     penalties.push(`治愈率未达标（${Math.floor(cureRate * 100)}% < ${Math.floor(cureRateTarget * 100)}%），声誉 -10`)
+    effectiveStats.reputationChange -= 10
   }
 
   const totalPenaltyCoins = effectiveStats.penaltiesApplied.reduce((a, b) => a + b, 0)
@@ -743,12 +745,10 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     let finalStats = { ...state.dailyStats }
     let player = { ...state.player }
-    let rentPaid = false
     if (player.coins >= state.effectiveRent) {
       player.coins -= state.effectiveRent
       finalStats.rentPaid = true
       finalStats.expenses += state.effectiveRent
-      rentPaid = true
     } else {
       finalStats.rentPaid = false
     }
@@ -765,13 +765,12 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     const penaltySum = report.stats.penaltiesApplied.reduce((a, b) => a + b, 0)
     player.coins = Math.max(0, player.coins - penaltySum)
-    if (!report.cureRateTargetMet && (report.stats.curedToday + report.stats.misdiagnosedToday) > 0) {
-      player.reputation = Math.max(0, player.reputation - 10)
-      finalStats.reputationChange -= 10
-    }
-    if (!rentPaid) {
-      player.reputation = Math.max(0, player.reputation - 15)
-      finalStats.reputationChange -= 15
+
+    const originalRepChange = state.dailyStats.reputationChange
+    const finalRepChange = report.stats.reputationChange
+    const repDelta = finalRepChange - originalRepChange
+    if (repDelta !== 0) {
+      player.reputation = Math.max(0, Math.min(100, player.reputation + repDelta))
     }
 
     const newDaysPassed = report.allTargetsMet ? [...state.daysPassedList, state.currentDay] : state.daysPassedList
@@ -780,7 +779,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({
       gamePhase: 'day_end',
       shiftPhase: 'closed',
-      dailyStats: finalStats,
+      dailyStats: report.stats,
       dayEndReport: report,
       player,
       daysPassedList: newDaysPassed,
