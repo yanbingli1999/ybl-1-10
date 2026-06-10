@@ -7,12 +7,23 @@ import {
   type DiagnosisResult,
   type ActionType,
   type AccidentType,
+  type ShiftPhase,
+  type DailyStats,
+  type DayEndReport,
+  type GameEndSummary,
+  type DailyEvent,
   initialEquipment,
   generatePetCase,
   generateInitialCases,
   generateTestCases,
+  generateWavePetCase,
   getDisease,
   getMedicine,
+  getDayConfig,
+  getDiseaseWave,
+  getRandomDailyEvent,
+  createInitialDailyStats,
+  dayConfigs,
 } from '@/data/gameData'
 
 interface GameState {
@@ -27,6 +38,18 @@ interface GameState {
   selectedMedicineId: string | null
   showMedicineSelector: boolean
   pendingAction: 'medicate' | 'inject' | 'feed' | null
+
+  currentDay: number
+  shiftPhase: ShiftPhase
+  shiftProgress: number
+  dailyStats: DailyStats
+  currentEvent: DailyEvent | null
+  effectiveRent: number
+  effectiveCureTarget: number
+  dayEndReport: DayEndReport | null
+  gameEndSummary: GameEndSummary | null
+  daysPassedList: number[]
+  daysFailedList: number[]
 
   selectCase: (id: string) => void
   examine: () => void
@@ -43,6 +66,14 @@ interface GameState {
   generateNewCase: () => void
   loadTestCases: () => void
   resetGame: () => void
+
+  startChallenge: () => void
+  startDay: (day: number) => void
+  confirmDayStart: () => void
+  advanceShift: () => void
+  triggerEndDay: () => void
+  confirmDayEnd: () => void
+  proceedNextDayOrEnd: () => void
 }
 
 const initialPlayer: Player = {
@@ -52,9 +83,12 @@ const initialPlayer: Player = {
   cured: 0,
   misdiagnosed: 0,
   totalIncome: 0,
+  reputation: 50,
 }
 
 const expPerLevel = 100
+const TOTAL_DAYS = 3
+const SHIFT_STEPS = 4
 
 function getCoinsForUrgency(urgency: PetCase['urgency']): number {
   switch (urgency) {
@@ -82,12 +116,124 @@ function getActionLabel(action: ActionType): string {
   }
 }
 
+function getShiftLabel(phase: ShiftPhase): string {
+  switch (phase) {
+    case 'morning': return '早班'
+    case 'afternoon': return '午班'
+    case 'evening': return '晚班'
+    case 'closed': return '打烊'
+  }
+}
+
+function computeDayEndReport(
+  day: number,
+  stats: DailyStats,
+  rent: number,
+  cureTarget: number,
+  cureRateTarget: number,
+  totalCasesTarget: number,
+  equipmentList: Equipment[]
+): DayEndReport {
+  const totalSeen = stats.curedToday + stats.misdiagnosedToday
+  const cureRate = totalSeen > 0 ? stats.curedToday / totalSeen : 0
+  const rentPaid = stats.rentPaid
+  const cureTargetMet = stats.curedToday >= cureTarget
+  const cureRateTargetMet = cureRate >= cureRateTarget
+  const penalties: string[] = []
+  const effectiveStats = { ...stats, penaltiesApplied: [...stats.penaltiesApplied] }
+
+  if (!rentPaid) {
+    penalties.push(`未支付租金！罚款 ${Math.floor(rent * 0.5)} ⬡，声誉 -15`)
+    effectiveStats.penaltiesApplied.push(Math.floor(rent * 0.5))
+  }
+  if (!cureTargetMet) {
+    const shortfall = cureTarget - stats.curedToday
+    const penalty = shortfall * 20
+    penalties.push(`治愈数未达标（差 ${shortfall} 例），罚款 ${penalty} ⬡`)
+    effectiveStats.penaltiesApplied.push(penalty)
+  }
+  if (!cureRateTargetMet && totalSeen > 0) {
+    penalties.push(`治愈率未达标（${Math.floor(cureRate * 100)}% < ${Math.floor(cureRateTarget * 100)}%），声誉 -10`)
+  }
+
+  const totalPenaltyCoins = effectiveStats.penaltiesApplied.reduce((a, b) => a + b, 0)
+  const netProfit = stats.income - stats.expenses - totalPenaltyCoins
+  const allTargetsMet = rentPaid && cureTargetMet && cureRateTargetMet
+
+  return {
+    day,
+    stats: effectiveStats,
+    rent,
+    cureTarget,
+    cureRateTarget,
+    totalCasesTarget,
+    cureRate,
+    rentPaid,
+    cureTargetMet,
+    cureRateTargetMet,
+    allTargetsMet,
+    penalties,
+    netProfit,
+    equipmentStatus: equipmentList.map(e => ({ id: e.id, name: e.name, status: e.status })),
+  }
+}
+
+function computeGameEndSummary(
+  player: Player,
+  daysPassed: number[],
+  daysFailed: number[],
+  totalAccidents: number
+): GameEndSummary {
+  const daysCompleted = daysPassed.length
+  const rep = player.reputation
+  const coins = player.coins
+  const cured = player.cured
+  const misdiagnosed = player.misdiagnosed
+  const accuracy = cured + misdiagnosed > 0 ? cured / (cured + misdiagnosed) : 0
+
+  let rating: GameEndSummary['overallRating'] = 'F'
+  let finalMessage = ''
+
+  if (daysCompleted >= 3 && coins >= 500 && rep >= 70 && accuracy >= 0.8) {
+    rating = 'S'
+    finalMessage = '传奇星际兽医！诊所声望响彻银河！'
+  } else if (daysCompleted >= 3 && coins >= 300 && rep >= 50 && accuracy >= 0.65) {
+    rating = 'A'
+    finalMessage = '优秀！你成功经营了三天，是位称职的星际医生！'
+  } else if (daysCompleted >= 2 && coins >= 150 && accuracy >= 0.5) {
+    rating = 'B'
+    finalMessage = '还不错，虽然有些坎坷，但整体还算顺利。'
+  } else if (daysCompleted >= 2) {
+    rating = 'C'
+    finalMessage = '勉强及格，还需要更多练习和经验。'
+  } else if (daysCompleted >= 1) {
+    rating = 'D'
+    finalMessage = '困难重重，不过至少开业了一天。'
+  } else {
+    rating = 'F'
+    finalMessage = '诊所第一天就倒闭了...下次加油！'
+  }
+
+  return {
+    totalCoins: coins,
+    totalCured: cured,
+    totalMisdiagnosed: misdiagnosed,
+    totalAccidents,
+    finalReputation: rep,
+    daysCompleted,
+    daysPassed,
+    daysFailed,
+    overallRating: rating,
+    finalMessage,
+  }
+}
+
 export const useGameStore = create<GameState>((set, get) => ({
   cases: generateInitialCases(5),
   activeCaseId: null,
   player: { ...initialPlayer },
   equipment: initialEquipment.map(e => ({ ...e })),
-  gamePhase: 'idle',
+  gamePhase: 'day_start',
   accidentType: null,
   diagnosisResult: null,
   actionCooldowns: {
@@ -101,9 +247,22 @@ export const useGameStore = create<GameState>((set, get) => ({
   showMedicineSelector: false,
   pendingAction: null,
 
+  currentDay: 1,
+  shiftPhase: 'morning',
+  shiftProgress: 0,
+  dailyStats: createInitialDailyStats(1),
+  currentEvent: null,
+  effectiveRent: 80,
+  effectiveCureTarget: 4,
+  dayEndReport: null,
+  gameEndSummary: null,
+  daysPassedList: [],
+  daysFailedList: [],
+
   selectCase: (id: string) => {
     const state = get()
     if (state.gamePhase === 'accident' || state.gamePhase === 'result') return
+    if (state.gamePhase === 'day_start' || state.gamePhase === 'day_end' || state.gamePhase === 'game_end') return
     set({
       activeCaseId: id,
       gamePhase: 'diagnosing',
@@ -159,7 +318,6 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (!activeCase) return
 
       const disease = getDisease(activeCase.diseaseId)
-      const itemType = action === 'feed' ? '食物' : '药品'
       const result: DiagnosisResult = {
         success: false,
         diseaseName: disease?.name || '',
@@ -215,6 +373,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     const isCorrect = actionCorrect && medicineCorrect
 
+    const currentStats = { ...state.dailyStats, casesSeen: state.dailyStats.casesSeen + 1 }
+
     if (isCorrect) {
       const coinsEarned = getCoinsForUrgency(activeCase.urgency)
       const expGain = activeCase.urgency === 'high' ? 30 : activeCase.urgency === 'medium' ? 20 : 10
@@ -249,6 +409,13 @@ export const useGameStore = create<GameState>((set, get) => ({
         errorType: null,
       }
 
+      const repGain = activeCase.urgency === 'high' ? 3 : activeCase.urgency === 'medium' ? 2 : 1
+      currentStats.income += coinsEarned
+      currentStats.expenses += medicineCost
+      currentStats.curedToday += 1
+      currentStats.medicineCostTotal += medicineCost
+      currentStats.reputationChange += repGain
+
       set({
         cases: updatedCases,
         player: {
@@ -258,7 +425,9 @@ export const useGameStore = create<GameState>((set, get) => ({
           exp: newExpAfterLevel,
           cured: state.player.cured + 1,
           totalIncome: state.player.totalIncome + coinsEarned,
+          reputation: Math.min(100, state.player.reputation + repGain),
         },
+        dailyStats: currentStats,
         gamePhase: 'result',
         diagnosisResult: result,
         showMedicineSelector: false,
@@ -310,6 +479,16 @@ export const useGameStore = create<GameState>((set, get) => ({
         errorType,
       }
 
+      const repLoss = 5
+      currentStats.expenses += (penalty + medicineCost)
+      currentStats.misdiagnosedToday += 1
+      currentStats.accidentsToday += 1
+      currentStats.medicineCostTotal += medicineCost
+      currentStats.reputationChange -= repLoss
+      if (damagedEquipId && !currentStats.equipmentDamaged.includes(damagedEquipId)) {
+        currentStats.equipmentDamaged.push(damagedEquipId)
+      }
+
       set({
         cases: updatedCases,
         equipment: updatedEquipment,
@@ -317,7 +496,9 @@ export const useGameStore = create<GameState>((set, get) => ({
           ...state.player,
           coins: Math.max(0, state.player.coins - totalDeduction),
           misdiagnosed: state.player.misdiagnosed + 1,
+          reputation: Math.max(0, state.player.reputation - repLoss),
         },
+        dailyStats: currentStats,
         gamePhase: 'accident',
         accidentType: disease.accidentType,
         diagnosisResult: result,
@@ -334,6 +515,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (!equip || equip.status === 'normal') return
     if (state.player.coins < equip.repairCost) return
 
+    const newStats = {
+      ...state.dailyStats,
+      equipmentRepairedCost: state.dailyStats.equipmentRepairedCost + equip.repairCost,
+      expenses: state.dailyStats.expenses + equip.repairCost,
+    }
+
     set({
       equipment: state.equipment.map(e =>
         e.id === id ? { ...e, status: 'normal' as const } : e
@@ -342,14 +529,18 @@ export const useGameStore = create<GameState>((set, get) => ({
         ...state.player,
         coins: state.player.coins - equip.repairCost,
       },
+      dailyStats: newStats,
     })
   },
 
   dismissResult: () => {
     const state = get()
+    const dayConfig = getDayConfig(state.currentDay)
     const remainingCases = state.cases.filter(c => c.status !== 'cured' && c.status !== 'accident')
-    while (remainingCases.length < 4) {
-      remainingCases.push(generatePetCase())
+    const minCases = 4
+    const targetCount = Math.ceil(minCases * (dayConfig?.caseGenerationRate || 1))
+    while (remainingCases.length < targetCount) {
+      remainingCases.push(generateWavePetCase(dayConfig?.diseaseWaveId || null))
     }
 
     set({
@@ -362,9 +553,12 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   dismissAccident: () => {
     const state = get()
+    const dayConfig = getDayConfig(state.currentDay)
     const remainingCases = state.cases.filter(c => c.status !== 'cured' && c.status !== 'accident')
-    while (remainingCases.length < 4) {
-      remainingCases.push(generatePetCase())
+    const minCases = 4
+    const targetCount = Math.ceil(minCases * (dayConfig?.caseGenerationRate || 1))
+    while (remainingCases.length < targetCount) {
+      remainingCases.push(generateWavePetCase(dayConfig?.diseaseWaveId || null))
     }
 
     set({
@@ -378,7 +572,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   generateNewCase: () => {
     const state = get()
-    const newCase = generatePetCase()
+    const dayConfig = getDayConfig(state.currentDay)
+    const newCase = generateWavePetCase(dayConfig?.diseaseWaveId || null)
     set({ cases: [...state.cases, newCase] })
   },
 
@@ -401,7 +596,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       activeCaseId: null,
       player: { ...initialPlayer },
       equipment: initialEquipment.map(e => ({ ...e })),
-      gamePhase: 'idle',
+      gamePhase: 'day_start',
       accidentType: null,
       diagnosisResult: null,
       actionCooldowns: {
@@ -414,6 +609,208 @@ export const useGameStore = create<GameState>((set, get) => ({
       showMedicineSelector: false,
       selectedMedicineId: null,
       pendingAction: null,
+      currentDay: 1,
+      shiftPhase: 'morning',
+      shiftProgress: 0,
+      dailyStats: createInitialDailyStats(1),
+      currentEvent: null,
+      effectiveRent: 80,
+      effectiveCureTarget: 4,
+      dayEndReport: null,
+      gameEndSummary: null,
+      daysPassedList: [],
+      daysFailedList: [],
     })
+  },
+
+  startChallenge: () => {
+    get().resetGame()
+  },
+
+  startDay: (day: number) => {
+    const state = get()
+    const dayConfig = getDayConfig(day)
+    if (!dayConfig) return
+    const event = getRandomDailyEvent()
+    let rent = dayConfig.rent
+    let cureTarget = dayConfig.cureTarget
+    let coins = state.player.coins
+    let reputation = state.player.reputation
+    const extraCases: PetCase[] = []
+
+    if (event.effect.coins) {
+      coins = Math.max(0, coins + event.effect.coins)
+    }
+    if (event.effect.reputation) {
+      reputation = Math.max(0, Math.min(100, reputation + event.effect.reputation))
+    }
+    if (event.effect.rentModifier) {
+      rent = Math.floor(rent * event.effect.rentModifier)
+    }
+    if (event.effect.cureTargetModifier) {
+      cureTarget = cureTarget + event.effect.cureTargetModifier
+    }
+    if (event.effect.immediateCases) {
+      for (let i = 0; i < event.effect.immediateCases; i++) {
+        extraCases.push(generateWavePetCase(dayConfig.diseaseWaveId))
+      }
+    }
+
+    const wave = dayConfig.diseaseWaveId ? getDiseaseWave(dayConfig.diseaseWaveId) : null
+    const waveBonusCases: PetCase[] = []
+    if (wave) {
+      for (let i = 0; i < wave.caseBonus; i++) {
+        waveBonusCases.push(generateWavePetCase(dayConfig.diseaseWaveId))
+      }
+    }
+
+    const initCount = 5
+    const initCases: PetCase[] = []
+    for (let i = 0; i < initCount; i++) {
+      initCases.push(generateWavePetCase(dayConfig.diseaseWaveId))
+    }
+
+    set({
+      currentDay: day,
+      shiftPhase: 'morning',
+      shiftProgress: 0,
+      dailyStats: createInitialDailyStats(day),
+      currentEvent: event,
+      effectiveRent: rent,
+      effectiveCureTarget: cureTarget,
+      dayEndReport: null,
+      gamePhase: 'day_start',
+      player: {
+        ...state.player,
+        coins,
+        reputation,
+      },
+      cases: [...initCases, ...extraCases, ...waveBonusCases],
+      activeCaseId: null,
+      accidentType: null,
+      diagnosisResult: null,
+      showMedicineSelector: false,
+      selectedMedicineId: null,
+      pendingAction: null,
+    })
+  },
+
+  confirmDayStart: () => {
+    set({
+      gamePhase: 'idle',
+      currentEvent: null,
+    })
+  },
+
+  advanceShift: () => {
+    const state = get()
+    const nextProgress = state.shiftProgress + 1
+    let nextPhase: ShiftPhase = state.shiftPhase
+
+    if (nextProgress < SHIFT_STEPS) {
+      nextPhase = 'morning'
+    } else if (nextProgress < SHIFT_STEPS * 2) {
+      nextPhase = 'afternoon'
+    } else if (nextProgress < SHIFT_STEPS * 3) {
+      nextPhase = 'evening'
+    } else {
+      nextPhase = 'closed'
+    }
+
+    if (nextPhase === 'closed') {
+      get().triggerEndDay()
+      return
+    }
+
+    const dayConfig = getDayConfig(state.currentDay)
+    const casesToAdd = Math.ceil(1 * (dayConfig?.caseGenerationRate || 1))
+    const newCases: PetCase[] = []
+    for (let i = 0; i < casesToAdd; i++) {
+      newCases.push(generateWavePetCase(dayConfig?.diseaseWaveId || null))
+    }
+
+    set({
+      shiftProgress: nextProgress,
+      shiftPhase: nextPhase,
+      cases: [...state.cases, ...newCases],
+    })
+  },
+
+  triggerEndDay: () => {
+    const state = get()
+    const dayConfig = getDayConfig(state.currentDay)
+    if (!dayConfig) return
+
+    let finalStats = { ...state.dailyStats }
+    let player = { ...state.player }
+    let rentPaid = false
+    if (player.coins >= state.effectiveRent) {
+      player.coins -= state.effectiveRent
+      finalStats.rentPaid = true
+      finalStats.expenses += state.effectiveRent
+      rentPaid = true
+    } else {
+      finalStats.rentPaid = false
+    }
+
+    const report = computeDayEndReport(
+      state.currentDay,
+      finalStats,
+      state.effectiveRent,
+      state.effectiveCureTarget,
+      dayConfig.cureRateTarget,
+      dayConfig.totalCasesTarget,
+      state.equipment
+    )
+
+    const penaltySum = report.stats.penaltiesApplied.reduce((a, b) => a + b, 0)
+    player.coins = Math.max(0, player.coins - penaltySum)
+    if (!report.cureRateTargetMet && (report.stats.curedToday + report.stats.misdiagnosedToday) > 0) {
+      player.reputation = Math.max(0, player.reputation - 10)
+      finalStats.reputationChange -= 10
+    }
+    if (!rentPaid) {
+      player.reputation = Math.max(0, player.reputation - 15)
+      finalStats.reputationChange -= 15
+    }
+
+    const newDaysPassed = report.allTargetsMet ? [...state.daysPassedList, state.currentDay] : state.daysPassedList
+    const newDaysFailed = !report.allTargetsMet ? [...state.daysFailedList, state.currentDay] : state.daysFailedList
+
+    set({
+      gamePhase: 'day_end',
+      shiftPhase: 'closed',
+      dailyStats: finalStats,
+      dayEndReport: report,
+      player,
+      daysPassedList: newDaysPassed,
+      daysFailedList: newDaysFailed,
+    })
+  },
+
+  confirmDayEnd: () => {
+    set({
+      dayEndReport: null,
+    })
+  },
+
+  proceedNextDayOrEnd: () => {
+    const state = get()
+    const nextDay = state.currentDay + 1
+    if (nextDay > TOTAL_DAYS) {
+      const totalAccidents = state.player.misdiagnosed
+      const summary = computeGameEndSummary(
+        state.player,
+        state.daysPassedList,
+        state.daysFailedList,
+        totalAccidents
+      )
+      set({
+        gameEndSummary: summary,
+        gamePhase: 'game_end',
+      })
+    } else {
+      get().startDay(nextDay)
+    }
   },
 }))

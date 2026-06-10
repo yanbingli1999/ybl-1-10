@@ -56,11 +56,13 @@ export interface Player {
   cured: number
   misdiagnosed: number
   totalIncome: number
+  reputation: number
 }
 
 export type ActionType = 'examine' | 'medicate' | 'inject' | 'feed' | 'isolate'
 export type AccidentType = 'split' | 'float' | 'bite'
-export type GamePhase = 'idle' | 'diagnosing' | 'treating' | 'accident' | 'result'
+export type GamePhase = 'idle' | 'diagnosing' | 'treating' | 'accident' | 'result' | 'day_start' | 'day_end' | 'game_end'
+export type ShiftPhase = 'morning' | 'afternoon' | 'evening' | 'closed'
 
 export interface DiagnosisResult {
   success: boolean
@@ -75,6 +77,88 @@ export interface DiagnosisResult {
   damagedEquipment: string | null
   message: string
   errorType: 'action' | 'medicine' | 'funds' | null
+}
+
+export interface DayConfig {
+  day: number
+  name: string
+  rent: number
+  cureTarget: number
+  cureRateTarget: number
+  totalCasesTarget: number
+  caseGenerationRate: number
+  description: string
+  diseaseWaveId: string | null
+}
+
+export interface DiseaseWave {
+  id: string
+  name: string
+  description: string
+  boostedDiseaseIds: string[]
+  urgencyBoost: 'low' | 'medium' | 'high' | null
+  caseBonus: number
+}
+
+export interface DailyEvent {
+  id: string
+  title: string
+  description: string
+  icon: string
+  type: 'positive' | 'negative' | 'neutral'
+  effect: {
+    coins?: number
+    reputation?: number
+    rentModifier?: number
+    cureTargetModifier?: number
+    immediateCases?: number
+  }
+}
+
+export interface DailyStats {
+  day: number
+  income: number
+  expenses: number
+  rentPaid: boolean
+  curedToday: number
+  misdiagnosedToday: number
+  accidentsToday: number
+  equipmentDamaged: string[]
+  equipmentRepairedCost: number
+  medicineCostTotal: number
+  casesSeen: number
+  reputationChange: number
+  penaltiesApplied: number[]
+}
+
+export interface DayEndReport {
+  day: number
+  stats: DailyStats
+  rent: number
+  cureTarget: number
+  cureRateTarget: number
+  totalCasesTarget: number
+  cureRate: number
+  rentPaid: boolean
+  cureTargetMet: boolean
+  cureRateTargetMet: boolean
+  allTargetsMet: boolean
+  penalties: string[]
+  netProfit: number
+  equipmentStatus: { id: string; name: string; status: Equipment['status'] }[]
+}
+
+export interface GameEndSummary {
+  totalCoins: number
+  totalCured: number
+  totalMisdiagnosed: number
+  totalAccidents: number
+  finalReputation: number
+  daysCompleted: number
+  daysPassed: number[]
+  daysFailed: number[]
+  overallRating: 'S' | 'A' | 'B' | 'C' | 'D' | 'F'
+  finalMessage: string
 }
 
 export const breeds: Breed[] = [
@@ -232,4 +316,210 @@ export function generateTestCases(): PetCase[] {
       examined: false,
     },
   ]
+}
+
+export const dayConfigs: DayConfig[] = [
+  {
+    day: 1,
+    name: '开业日',
+    rent: 80,
+    cureTarget: 4,
+    cureRateTarget: 0.6,
+    totalCasesTarget: 7,
+    caseGenerationRate: 1,
+    description: '诊所第一天开业，任务轻松，熟悉流程为主。',
+    diseaseWaveId: null,
+  },
+  {
+    day: 2,
+    name: '分裂痘潮',
+    rent: 120,
+    cureTarget: 6,
+    cureRateTarget: 0.65,
+    totalCasesTarget: 10,
+    caseGenerationRate: 1.3,
+    description: '分裂痘在星际社区爆发，紧急病例激增！',
+    diseaseWaveId: 'split_wave',
+  },
+  {
+    day: 3,
+    name: '混合瘟疫',
+    rent: 180,
+    cureTarget: 8,
+    cureRateTarget: 0.7,
+    totalCasesTarget: 13,
+    caseGenerationRate: 1.5,
+    description: '多种疾病同时爆发，设备压力巨大，终极挑战！',
+    diseaseWaveId: 'mixed_wave',
+  },
+]
+
+export const diseaseWaves: DiseaseWave[] = [
+  {
+    id: 'split_wave',
+    name: '分裂痘大流行',
+    description: '黏液球社区爆发分裂痘疫情，病例数翻倍！',
+    boostedDiseaseIds: ['split_pox', 'crystal_cough'],
+    urgencyBoost: 'high',
+    caseBonus: 2,
+  },
+  {
+    id: 'mixed_wave',
+    name: '多源混合瘟疫',
+    description: '所有疾病同时出现，设备损坏率上升！',
+    boostedDiseaseIds: ['split_pox', 'float_fever', 'chomp_bite', 'shadow_rust'],
+    urgencyBoost: 'medium',
+    caseBonus: 3,
+  },
+]
+
+export const dailyEvents: DailyEvent[] = [
+  {
+    id: 'grant',
+    title: '星际医疗补助',
+    description: '星际卫生组织授予你创业补助金！',
+    icon: '💰',
+    type: 'positive',
+    effect: { coins: 50 },
+  },
+  {
+    id: 'review',
+    title: '正面评价',
+    description: '一位治愈的宠物主人在星际点评上留下五星好评！',
+    icon: '⭐',
+    type: 'positive',
+    effect: { reputation: 10 },
+  },
+  {
+    id: 'donation',
+    title: '匿名捐赠',
+    description: '一位好心人偷偷留下一笔星币捐款！',
+    icon: '🎁',
+    type: 'positive',
+    effect: { coins: 30 },
+  },
+  {
+    id: 'inspection',
+    title: '卫生检查',
+    description: '星际卫生部上门检查，额外收取审查费用...',
+    icon: '📋',
+    type: 'negative',
+    effect: { coins: -40 },
+  },
+  {
+    id: 'complaint',
+    title: '投诉风波',
+    description: '有人投诉等待时间过长，声誉受损！',
+    icon: '📢',
+    type: 'negative',
+    effect: { reputation: -8 },
+  },
+  {
+    id: 'power_surge',
+    title: '电力波动',
+    description: '空间站电力波动，设备受损风险上升。',
+    icon: '⚡',
+    type: 'neutral',
+    effect: {},
+  },
+  {
+    id: 'rush_hour',
+    title: '高峰时段',
+    description: '突然涌入一大批急诊病例！',
+    icon: '🚑',
+    type: 'neutral',
+    effect: { immediateCases: 3 },
+  },
+  {
+    id: 'rent_discount',
+    title: '房东优惠',
+    description: '房东今日心情好，租金打八折！',
+    icon: '🏠',
+    type: 'positive',
+    effect: { rentModifier: 0.8 },
+  },
+  {
+    id: 'target_change',
+    title: '医疗官视察',
+    description: '星际医疗官今日视察，治愈目标提高！',
+    icon: '🎯',
+    type: 'negative',
+    effect: { cureTargetModifier: 2 },
+  },
+  {
+    id: 'vip',
+    title: 'VIP客户',
+    description: '一位VIP客户光顾，声誉与星币双丰收！',
+    icon: '👑',
+    type: 'positive',
+    effect: { coins: 60, reputation: 5 },
+  },
+]
+
+export function getDayConfig(day: number): DayConfig | undefined {
+  return dayConfigs.find(d => d.day === day)
+}
+
+export function getDiseaseWave(id: string): DiseaseWave | undefined {
+  return diseaseWaves.find(w => w.id === id)
+}
+
+export function getRandomDailyEvent(): DailyEvent {
+  return dailyEvents[Math.floor(Math.random() * dailyEvents.length)]
+}
+
+export function generateWavePetCase(waveId: string | null): PetCase {
+  if (!waveId) return generatePetCase()
+  const wave = getDiseaseWave(waveId)
+  if (!wave) return generatePetCase()
+  caseCounter++
+  const diseasePool = diseases.filter(d => wave.boostedDiseaseIds.includes(d.id))
+  const disease = diseasePool.length > 0 && Math.random() < 0.7
+    ? diseasePool[Math.floor(Math.random() * diseasePool.length)]
+    : diseases[Math.floor(Math.random() * diseases.length)]
+  const breed = breeds[Math.floor(Math.random() * breeds.length)]
+  const name = petNames[Math.floor(Math.random() * petNames.length)]
+  let urgency: PetCase['urgency']
+  if (wave.urgencyBoost === 'high') {
+    urgency = Math.random() < 0.6 ? 'high' : Math.random() < 0.5 ? 'medium' : 'low'
+  } else if (wave.urgencyBoost === 'medium') {
+    urgency = Math.random() < 0.4 ? 'medium' : Math.random() < 0.5 ? 'high' : 'low'
+  } else {
+    const urgencyLevels: PetCase['urgency'][] = ['low', 'medium', 'high']
+    urgency = urgencyLevels[Math.floor(Math.random() * urgencyLevels.length)]
+  }
+  const symptomIds = getSymptomsForDisease(disease.id)
+  const extraSymptoms = symptoms
+    .filter(s => !symptomIds.includes(s.id))
+    .sort(() => Math.random() - 0.5)
+    .slice(0, Math.floor(Math.random() * 2))
+    .map(s => s.id)
+  return {
+    id: `case_${Date.now()}_${caseCounter}`,
+    petName: name,
+    breedId: breed.id,
+    diseaseId: disease.id,
+    symptomIds: [...symptomIds, ...extraSymptoms],
+    urgency,
+    status: 'waiting',
+    examined: false,
+  }
+}
+
+export function createInitialDailyStats(day: number): DailyStats {
+  return {
+    day,
+    income: 0,
+    expenses: 0,
+    rentPaid: false,
+    curedToday: 0,
+    misdiagnosedToday: 0,
+    accidentsToday: 0,
+    equipmentDamaged: [],
+    equipmentRepairedCost: 0,
+    medicineCostTotal: 0,
+    casesSeen: 0,
+    reputationChange: 0,
+    penaltiesApplied: [],
+  }
 }
